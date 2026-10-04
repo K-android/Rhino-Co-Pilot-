@@ -1,117 +1,289 @@
-from mcp.server.fastmcp import FastMCP
-import httpx
-import os
-import json
+"""
+Rhino Co-Pilot MCP Server
+Handles zero-trust geometry conditioning, metadata injection, and execution for Revit migration.
+"""
 
-# Initialize the FastMCP server
-mcp = FastMCP("K_CAD_Automation_Bridge")
+import httpx
+from mcp.server.fastmcp import FastMCP
+
+# Initialize the MCP Server
+mcp = FastMCP("Rhino_Revit_Bridge")
+RHINO_FLASK_URL = "http://localhost:5050/execute_code"
+
+def execute_in_rhino(script_code: str) -> str:
+    """Helper function to push Python code to the Rhino Flask server."""
+    try:
+        response = httpx.post(RHINO_FLASK_URL, json={"code": script_code}, timeout=15.0)
+        return response.text
+    except Exception as e:
+        return f"Pipeline connection error. Ensure Rhino Flask server is running on port 5050. Details: {e}"
+
+# ---------------------------------------------------------------------------
+# 1. CORE EXECUTION TOOL
+# ---------------------------------------------------------------------------
 
 @mcp.tool()
 def run_rhino_python(code: str) -> str:
     """
-    Executes Python 3 code directly inside the active Rhino document via Port 5050.
-    Use this to generate geometry, modify elements, or extract coordinates.
+    Executes raw Python 3 geometry logic in Rhino using rhinoscriptsyntax.
+    Use this when explicitly instructed to generate or manipulate 3D form.
     """
-    try:
-        res = httpx.post(
-            "http://localhost:5050/execute", 
-            json={"code": code}, 
-            timeout=15.0
-        )
-        data = res.json()
-        if data.get("status") == "success":
-            return data.get("output", "Command executed successfully with no print output.")
-        else:
-            return f"Rhino Execution Error: {data.get('message', 'Unknown error')}"
-    except Exception as e:
-        return f"Bridge connection failed. Is copilot_flask.py running in Rhino on Port 5050? Error: {str(e)}"
+    return execute_in_rhino(code)
+
+# ---------------------------------------------------------------------------
+# 2. ZERO-TRUST JANITOR & CLEANUP
+# ---------------------------------------------------------------------------
 
 @mcp.tool()
-def run_revit_python(code: str) -> str:
+def run_zero_trust_cleanup() -> str:
     """
-    Executes Python 3 code directly inside the active Revit document via Port 5051.
-    Use this to push geometry, automate parameters, or instantiate Revit families.
+    Runs a zero-trust automated sanitation routine on the active Rhino document.
+    Call this when the user asks to clean up, sort, or organize a messy CAD file.
     """
-    try:
-        res = httpx.post(
-            "http://localhost:5051/execute_revit", 
-            json={"code": code}, 
-            timeout=15.0
-        )
-        data = res.json()
-        if data.get("status") == "success":
-            return data.get("output", "Revit pipeline executed successfully.")
-        else:
-            return f"Revit API Error: {data.get('message', 'Unknown error')}"
-    except Exception as e:
-        return f"Bridge connection failed. Ensure the pyRevit listener is running on Port 5051. Error: {str(e)}"
+    rhino_script = '''
+import rhinoscriptsyntax as rs
+
+def zero_trust_janitor():
+    rs.EnableRedraw(False)
+    
+    # Setup Standard Layers
+    layers = {"K_Curves": (0,0,255), "K_Surfaces": (255,0,0), "K_Meshes": (0,255,0), "K_Broken_Geometry": (255,165,0)}
+    for name, color in layers.items():
+        if not rs.IsLayer(name):
+            rs.AddLayer(name, color)
+            
+    all_objs = rs.AllObjects()
+    if not all_objs: return "Model is empty."
+    
+    moved, deleted = 0, 0
+    for obj in all_objs:
+        if rs.IsCurve(obj):
+            if rs.CurveLength(obj) < 1.0:
+                rs.DeleteObject(obj)
+                deleted += 1
+            elif not rs.IsCurveClosed(obj) and rs.IsCurvePlanar(obj):
+                rs.ObjectLayer(obj, "K_Broken_Geometry")
+                moved += 1
+            else:
+                rs.ObjectLayer(obj, "K_Curves")
+                moved += 1
+        elif rs.IsSurface(obj) or rs.IsPolysurface(obj):
+            rs.ObjectLayer(obj, "K_Surfaces")
+            moved += 1
+        elif rs.IsMesh(obj):
+            rs.ObjectLayer(obj, "K_Meshes")
+            moved += 1
+            
+    rs.EnableRedraw(True)
+    return f"Cleanup Complete: Sorted {moved} objects. Purged {deleted} micro-segments."
+
+print(zero_trust_janitor())
+'''
+    return execute_in_rhino(rhino_script)
+
+# ---------------------------------------------------------------------------
+# 3. REVIT-PROOFING & DATA CONDITIONING
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def audit_revit_solids() -> str:
+    """
+    Scans all polysurfaces to ensure they are closed, manifold solids.
+    Use this to prevent open polysurfaces from failing to generate volumes in Revit.
+    """
+    rhino_script = '''
+import rhinoscriptsyntax as rs
+
+def audit_solids():
+    rs.EnableRedraw(False)
+    error_layer = "K_Revit_OpenSolids"
+    if not rs.IsLayer(error_layer): rs.AddLayer(error_layer, (255, 0, 0))
+    
+    breps = rs.ObjectsByType(16)
+    if not breps: return "No polysurfaces found."
+    
+    failed = 0
+    for brep in breps:
+        if not rs.IsPolysurfaceClosed(brep):
+            rs.ObjectLayer(brep, error_layer)
+            failed += 1
+            
+    rs.EnableRedraw(True)
+    return f"Solid Audit: {failed} open polysurfaces isolated to {error_layer}."
+    
+print(audit_solids())
+'''
+    return execute_in_rhino(rhino_script)
+
+@mcp.tool()
+def assign_rhino_inside_category(revit_category: str) -> str:
+    """
+    Tags selected Rhino geometry with the 'RevitCategory' parameter (e.g., 'OST_Walls').
+    Use this so Rhino.Inside.Revit knows exactly what BIM element category to generate.
+    """
+    rhino_script = f'''
+import rhinoscriptsyntax as rs
+
+def tag_category():
+    objs = rs.GetObjects("Select objects for Revit", preselect=True)
+    if not objs: return "No objects selected."
+    
+    for obj in objs:
+        rs.SetUserText(obj, "RevitCategory", "{revit_category}")
+        
+    return f"Successfully tagged {{len(objs)}} objects as {revit_category}."
+    
+print(tag_category())
+'''
+    return execute_in_rhino(rhino_script)
+
+@mcp.tool()
+def enforce_revit_tolerances() -> str:
+    """
+    Verifies document is in millimeters and isolates invalid geometry objects.
+    Use this to prevent scaling errors and API crashes during Revit import.
+    """
+    rhino_script = '''
+import rhinoscriptsyntax as rs
+
+def check_tolerances():
+    report = []
+    
+    if rs.UnitSystem() != 2:
+        report.append("CRITICAL: Document is NOT in millimeters. Revit scale will fail.")
+    else:
+        report.append("Units: Millimeters (Pass)")
+        
+    bad_objs = [obj for obj in rs.AllObjects() if not rs.IsObjectValid(obj)]
+    if bad_objs:
+        bad_layer = "K_Revit_BadObjects"
+        if not rs.IsLayer(bad_layer): rs.AddLayer(bad_layer, (255, 100, 100))
+        for b in bad_objs: rs.ObjectLayer(b, bad_layer)
+        report.append(f"Found {len(bad_objs)} invalid objects. Moved to {bad_layer}.")
+    else:
+        report.append("Geometry Validity: All clear (Pass)")
+        
+    return "\\n".join(report)
+
+print(check_tolerances())
+'''
+    return execute_in_rhino(rhino_script)
+
+# ---------------------------------------------------------------------------
+# 4. INSPECTION & PIPELINE STRATEGY
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def inspect_rhino_selection() -> str:
+    """
+    Checks the user's active Rhino selection. Returns object count and types.
+    Use this when you need context on what the user has highlighted.
+    """
+    rhino_script = '''
+import rhinoscriptsyntax as rs
+
+def inspect_selection():
+    objs = rs.GetObjects("Select", preselect=True)
+    if not objs: return "No objects currently selected."
+    
+    types = {}
+    for obj in objs:
+        obj_type = rs.ObjectType(obj)
+        types[obj_type] = types.get(obj_type, 0) + 1
+        
+    return f"Selected {len(objs)} objects. Type breakdown: {types}"
+    
+print(inspect_selection())
+'''
+    return execute_in_rhino(rhino_script)
+
+@mcp.tool()
+def run_rigorous_qaqc() -> str:
+    """
+    Runs a detailed QA/QC check on selected objects, hunting for naked edges.
+    """
+    rhino_script = '''
+import rhinoscriptsyntax as rs
+import scriptcontext as sc
+
+def qaqc():
+    objs = rs.GetObjects("Select objects for QA/QC", preselect=True)
+    if not objs: return "No objects selected to audit."
+    
+    naked_edges = 0
+    for obj in objs:
+        if rs.IsPolysurface(obj):
+            brep = rs.coercebrep(obj)
+            if brep:
+                for edge in brep.Edges:
+                    if edge.Valence == Rhino.Geometry.EdgeAdjacency.Naked:
+                        naked_edges += 1
+                        
+    return f"QA/QC Report: Found {naked_edges} naked/open edges in selection."
+
+print(qaqc())
+'''
+    return execute_in_rhino(rhino_script)
 
 @mcp.tool()
 def analyze_geometry_for_revit() -> str:
     """
-    Analyzes the user's currently selected Rhino geometry to determine the optimal export path to Revit.
-    Call this when the user asks how to transfer, export, or convert a model to Revit.
+    Evaluates the active selection and suggests the safest Revit API translation method.
     """
-    # Package the Rhino-side logic and send it to Port 5050 to execute securely inside the CAD environment
     rhino_script = '''
 import rhinoscriptsyntax as rs
-import json
 
-selected = rs.GetObjects("Select objects", preselect=True)
-if not selected:
-    print("No geometry currently selected in the viewport.")
-else:
-    breakdown = {"meshes": 0, "planar_surfaces": 0, "complex_polysurfaces": 0, "blocks": 0, "curves": 0}
+def analyze_for_revit():
+    objs = rs.GetObjects("Select", preselect=True)
+    if not objs: return "No geometry selected to analyze."
     
-    for obj in selected:
-        if rs.IsMesh(obj):
-            breakdown["meshes"] += 1
-        elif rs.IsBlockInstance(obj):
-            breakdown["blocks"] += 1
-        elif rs.IsCurve(obj):
-            breakdown["curves"] += 1
-        elif rs.IsPolysurface(obj) or rs.IsSurface(obj):
-            if rs.IsSurfacePlanar(obj) or rs.IsPolysurfacePlanar(obj):
-                breakdown["planar_surfaces"] += 1
-            else:
-                breakdown["complex_polysurfaces"] += 1
-                
-    print(f"Analyzed {len(selected)} objects.")
-    print(f"Topology breakdown: {json.dumps(breakdown)}")
-    print("INSTRUCTIONS FOR AI: Based on this breakdown, present the user with the most viable Revit translation options using Rhino.Inside.Revit.")
-    print("Do not write the script yet. Just explain the pros and cons of Native Elements vs. DirectShape vs. Family Instances.")
+    meshes, breps, curves = 0, 0, 0
+    for obj in objs:
+        if rs.IsMesh(obj): meshes += 1
+        elif rs.IsPolysurface(obj) or rs.IsSurface(obj): breps += 1
+        elif rs.IsCurve(obj): curves += 1
+        
+    strategy = "Revit Transfer Strategy:\\n"
+    if meshes > 0: strategy += "- Meshes detected: Use DirectShape fallback.\\n"
+    if breps > 0: strategy += "- Breps detected: Use FreeformElement or Native Family mapping.\\n"
+    if curves > 0: strategy += "- Curves detected: Use Model Lines or Adaptive Component rigs.\\n"
+    
+    return strategy
+
+print(analyze_for_revit())
 '''
-    return run_rhino_python(rhino_script)
+    return execute_in_rhino(rhino_script)
 
 @mcp.tool()
-def scaffold_pyrevit_button(button_name: str, python_logic: str) -> str:
+def scaffold_pyrevit_button() -> str:
     """
-    Generates a valid pyRevit .pushbutton folder structure and script.py file.
-    Use this when the user asks to create a Revit automation tool or pyRevit script.
+    Generates a blank, formatted pyRevit pushbutton template. 
+    Returns the string text to the user. No Rhino execution required.
     """
-    # Create the standard pyRevit nested folder structure using the Windows user profile path
-    desktop = os.path.join(os.environ["USERPROFILE"], "Desktop")
-    base_dir = os.path.join(desktop, "K_CAD_Engine.extension", "Automation.tab", "Pipeline.panel")
-    button_dir = os.path.join(base_dir, f"{button_name.replace(' ', '_')}.pushbutton")
-    
-    os.makedirs(button_dir, exist_ok=True)
-    script_path = os.path.join(button_dir, "script.py")
-    
-    # Inject standard pyRevit boilerplate for API access and UI forms if missing
-    if "from pyrevit import" not in python_logic:
-        boilerplate = (
-            "#! python3\n"
-            "from pyrevit import revit, DB, UI, forms\n"
-            "doc = revit.doc\n"
-            "uidoc = revit.uidoc\n\n"
-        )
-        python_logic = boilerplate + python_logic
+    boilerplate = '''# -*- coding: utf-8 -*-
+__title__ = "Custom pyRevit Tool"
+__doc__ = """Executes automated Revit API operations."""
+
+from pyrevit import revit, DB, UI
+
+doc = revit.doc
+uidoc = revit.uidoc
+
+def main():
+    selection = [doc.GetElement(id) for id in uidoc.Selection.GetElementIds()]
+    if not selection:
+        UI.TaskDialog.Show("Selection Error", "Please select Revit elements.")
+        return
         
-    with open(script_path, "w", encoding="utf-8") as f:
-        f.write(python_logic)
-        
-    return f"Successfully scaffolded pyRevit extension button at: {button_dir}"
+    with revit.Transaction("Automated Operation"):
+        # Custom logic goes here
+        pass
 
 if __name__ == "__main__":
-    # Start the standard input/output server for LangGraph client integration
-    mcp.run(transport='stdio')
+    main()
+'''
+    return f"Provide this boilerplate to the user for their pyRevit .pushbutton folder:\n\n```python\n{boilerplate}\n```"
+
+if __name__ == "__main__":
+    # Start the MCP server process
+    mcp.run(transport="stdio")
