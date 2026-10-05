@@ -56,7 +56,7 @@ PREREQUISITES
 INSTALLATION & SETUP
 ----------------------------------------------------------------------
 1. Clone & Install Dependencies
-   git clone https://github.com/YOUR_USERNAME/Rhino-Co-Pilot.git
+   git clone https://github.com/K-android/Rhino-Co-Pilot.git
    cd Rhino-Co-Pilot
    python -m venv venv
    venv\Scripts\activate
