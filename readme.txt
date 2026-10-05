@@ -1,5 +1,5 @@
 ======================================================================
-Rhino Co-Pilot: K-CAD Automation Engine
+Rhino Co-Pilot: Automation Engine
 ======================================================================
 
 A locally hosted, context-aware Rhino and Revit automation agent. This system uses a Gradio interface, MCP-based tool routing, multimodal vision input, conversational memory, and AI-generated CAD operations to bridge the interoperability gap between Rhino 8 and Revit. 
